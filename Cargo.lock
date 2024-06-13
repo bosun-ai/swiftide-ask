@@ -1826,6 +1826,7 @@ dependencies = [
  "ignore",
  "indoc",
  "itertools 0.13.0",
+ "num_cpus",
  "qdrant-client",
  "redis",
  "serde",
