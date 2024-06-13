@@ -1,0 +1,10 @@
+[package]
+name = "swiftide-ask"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+qdrant-client = "1.9.0"
+swiftide = { path = "../swiftide/swiftide" }
+tokio = "1.38.0"
