@@ -1849,6 +1849,7 @@ name = "swiftide-ask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "indoc",
  "qdrant-client",
  "swiftide",
  "tokio",
