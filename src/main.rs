@@ -17,13 +17,13 @@ const SUPPORTED_CODE_EXTENSIONS: [&str; 27] = [
 async fn main() {
     let config = config::Config::from_env();
 
-    // path is the current working directory
     let path = std::env::current_dir().unwrap();
 
-    // namespace is "swiftide-ask-" + the current working directory
-    let namespace = "swiftide-ask-".to_string() + path.to_str().unwrap();
+    let namespace = format!("swiftide-ask-{}", path.to_string_lossy().replace("/", "-"));
 
     let llm_client = swiftide::integrations::openai::OpenAI::builder()
+        .default_embed_model("text-embedding-3-small")
+        .default_prompt_model("gpt-3.5-turbo")
         .build()
         .expect("Could not build OpenAI client");
 
@@ -68,6 +68,8 @@ async fn ask(
         })
         .await?;
 
+    println!("Answer context points: {:?}", answer_context_points);
+
     let answer_context =
         answer_context_points
             .result
@@ -87,11 +89,14 @@ async fn ask(
         ## Constraints
         * Only answer based on the provided context below
         * Answer the question fully and remember to be concise
+        * Do not mention technologies, tools or symbols that are not present in the context
 
-        ## Additional information found
+        ## Context:
         {answer_context}
         "#,
     );
+
+    println!("Full prompt:\n\n{}\n\n", prompt);
 
     let answer = llm_client.prompt(prompt.as_str()).await?;
 
@@ -131,6 +136,7 @@ async fn load_codebase(
                     .build()
                     .expect("Could not build Qdrant client"),
             )
+            .collection_name(namespace.to_string())
             .batch_size(1024)
             .vector_size(EMBEDDING_SIZE)
             .build()?,
