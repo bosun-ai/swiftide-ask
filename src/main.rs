@@ -68,8 +68,6 @@ async fn ask(
         })
         .await?;
 
-    println!("Answer context points: {:?}", answer_context_points);
-
     let answer_context =
         answer_context_points
             .result
@@ -95,8 +93,6 @@ async fn ask(
         {answer_context}
         "#,
     );
-
-    println!("Full prompt:\n\n{}\n\n", prompt);
 
     let answer = llm_client.prompt(prompt.as_str()).await?;
 
@@ -144,7 +140,6 @@ async fn load_codebase(
     .run()
     .await?;
 
-    // Load any documentation
     swiftide::ingestion::IngestionPipeline::from_loader(
         swiftide::loaders::FileLoader::new(path.clone())
             .with_extensions(&SUPPORTED_CODE_EXTENSIONS),
@@ -171,6 +166,7 @@ async fn load_codebase(
             )
             .batch_size(1024)
             .vector_size(EMBEDDING_SIZE)
+            .collection_name(namespace.to_string())
             .build()?,
     )
     .run()

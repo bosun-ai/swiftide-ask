@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+#[allow(dead_code)]
 pub struct Config {
     pub openai_api_key: String,
     pub openai_endpoint: Option<String>,
