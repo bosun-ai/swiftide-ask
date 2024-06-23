@@ -4,22 +4,26 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use indoc::formatdoc;
 use qdrant_client::client::QdrantClientConfig;
-use swiftide::{self, Embed, SimplePrompt};
-// use swiftide::{loaders, node_caches, storage, transformers, IngestionPipeline};
+use swiftide::{self, EmbeddingModel, SimplePrompt};
 
-const EMBEDDING_SIZE: usize = 1536;
-const SUPPORTED_CODE_EXTENSIONS: [&str; 27] = [
-    "py", "rs", "js", "ts", "tsx", "jsx", "vue", "go", "java", "cpp", "cxx", "hpp", "c", "swift",
-    "rb", "php", "cs", "html", "css", "sh", "kt", "clj", "cljc", "cljs", "edn", "scala", "groovy",
-];
+const EMBEDDING_SIZE: u64 = 1536;
+// const SUPPORTED_CODE_EXTENSIONS: [&str; 27] = [
+//     "py", "rs", "js", "ts", "tsx", "jsx", "vue", "go", "java", "cpp", "cxx", "hpp", "c", "swift",
+//     "rb", "php", "cs", "html", "css", "sh", "kt", "clj", "cljc", "cljs", "edn", "scala", "groovy",
+// ];
+const SUPPORTED_CODE_EXTENSIONS: [&str; 1] = ["rs"];
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     let config = config::Config::from_env();
 
     let path = std::env::current_dir().unwrap();
 
-    let namespace = format!("swiftide-ask-{}", path.to_string_lossy().replace("/", "-"));
+    let namespace = format!(
+        "swiftide-ask-v1-{}",
+        path.to_string_lossy().replace("/", "-")
+    );
 
     let llm_client = swiftide::integrations::openai::OpenAI::builder()
         .default_embed_model("text-embedding-3-small")
@@ -110,7 +114,7 @@ async fn load_codebase(
         swiftide::loaders::FileLoader::new(path.clone()).with_extensions(&["md"]),
     )
     .with_concurrency(50)
-    .filter_cached(swiftide::integrations::redis::RedisNodeCache::try_from_url(
+    .filter_cached(swiftide::integrations::redis::Redis::try_from_url(
         config.redis_url.as_deref().context("Expected redis url")?,
         namespace,
     )?)
@@ -120,11 +124,8 @@ async fn load_codebase(
     .then(swiftide::transformers::MetadataQAText::new(
         llm_client.clone(),
     ))
-    .then_in_batch(
-        100,
-        swiftide::transformers::OpenAIEmbed::new(llm_client.clone()),
-    )
-    .store_with(
+    .then_in_batch(100, swiftide::transformers::Embed::new(llm_client.clone()))
+    .then_store_with(
         swiftide::integrations::qdrant::Qdrant::builder()
             .client(
                 QdrantClientConfig::from_url(config.qdrant_url.as_str())
@@ -145,18 +146,18 @@ async fn load_codebase(
             .with_extensions(&SUPPORTED_CODE_EXTENSIONS),
     )
     .with_concurrency(50)
-    .filter_cached(swiftide::integrations::redis::RedisNodeCache::try_from_url(
+    .filter_cached(swiftide::integrations::redis::Redis::try_from_url(
         config.redis_url.as_deref().context("Expected redis url")?,
         namespace,
     )?)
+    .then_chunk(
+        swiftide::transformers::ChunkCode::try_for_language_and_chunk_size("rust", 10..2048)?,
+    )
     .then(swiftide::transformers::MetadataQACode::new(
         llm_client.clone(),
     ))
-    .then_in_batch(
-        100,
-        swiftide::transformers::OpenAIEmbed::new(llm_client.clone()),
-    )
-    .store_with(
+    .then_in_batch(10, swiftide::transformers::Embed::new(llm_client.clone()))
+    .then_store_with(
         swiftide::integrations::qdrant::Qdrant::builder()
             .client(
                 QdrantClientConfig::from_url(config.qdrant_url.as_str())
