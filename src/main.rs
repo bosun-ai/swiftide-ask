@@ -153,6 +153,8 @@ async fn load_codebase(
     .then_chunk(
         swiftide::transformers::ChunkCode::try_for_language_and_chunk_size("rust", 10..2048)?,
     )
+    .log_errors()
+    .filter_errors()
     .then(swiftide::transformers::MetadataQACode::new(
         llm_client.clone(),
     ))
