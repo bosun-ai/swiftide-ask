@@ -1845,7 +1845,9 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 
 [[package]]
 name = "swiftide"
-version = "0.3.3"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb47d964b709fb73ea94cbecd0f275ede5d4c458c2d89d597d52f96fee2c6fd4"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1919,9 +1921,9 @@ dependencies = [
 
 [[package]]
 name = "text-splitter"
-version = "0.13.3"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ab9dc04b7cf08eb01c07c272bf699fa55679a326ddf7dd075e14094efc80fb9"
+checksum = "b10765cee3b684768f654b1849be5b555eef28f894c114c05e6dec4e41c1423c"
 dependencies = [
  "ahash",
  "auto_enums",
