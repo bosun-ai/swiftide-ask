@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use indoc::formatdoc;
-use qdrant_client::client::QdrantClientConfig;
+use qdrant_client::config::QdrantConfig;
 use std::io::Write;
 use swiftide::{self, EmbeddingModel, SimplePrompt};
 
@@ -22,7 +22,7 @@ async fn main() {
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v2-{}",
+        "swiftide-ask-v3-{}",
         path.to_string_lossy().replace("/", "-")
     );
 
@@ -70,8 +70,8 @@ async fn ask(
     _path: PathBuf,
     question: String,
 ) -> Result<String> {
-    let qdrant_client = QdrantClientConfig::from_url(config.qdrant_url.as_str())
-        .with_api_key(config.qdrant_api_key.clone())
+    let qdrant_client = QdrantConfig::from_url(config.qdrant_url.as_str())
+        .api_key(config.qdrant_api_key.clone())
         .build()
         .expect("Could not build Qdrant client");
 
@@ -105,13 +105,14 @@ async fn ask(
         .context("Expected embedding")?;
 
     let answer_context_points = qdrant_client
-        .search_points(&qdrant_client::qdrant::SearchPoints {
-            collection_name: namespace.to_string(),
-            vector: embedded_question,
-            limit: 10,
-            with_payload: Some(true.into()),
-            ..Default::default()
-        })
+        .search_points(
+            qdrant_client::qdrant::SearchPointsBuilder::new(
+                namespace.to_string(),
+                embedded_question,
+                10,
+            )
+            .with_payload(true),
+        )
         .await?;
 
     // Probably better to return the documents themselves, not the metadata
@@ -161,7 +162,7 @@ async fn load_codebase(
     path: PathBuf,
 ) -> Result<()> {
     // Load any documentation
-    swiftide::ingestion::IngestionPipeline::from_loader(
+    swiftide::ingestion::Pipeline::from_loader(
         swiftide::loaders::FileLoader::new(path.clone()).with_extensions(&["md"]),
     )
     .filter_cached(swiftide::integrations::redis::Redis::try_from_url(
@@ -178,8 +179,8 @@ async fn load_codebase(
     .then_store_with(
         swiftide::integrations::qdrant::Qdrant::builder()
             .client(
-                QdrantClientConfig::from_url(config.qdrant_url.as_str())
-                    .with_api_key(config.qdrant_api_key.clone())
+                QdrantConfig::from_url(config.qdrant_url.as_str())
+                    .api_key(config.qdrant_api_key.clone())
                     .build()
                     .expect("Could not build Qdrant client"),
             )
@@ -191,7 +192,7 @@ async fn load_codebase(
     .run()
     .await?;
 
-    swiftide::ingestion::IngestionPipeline::from_loader(
+    swiftide::ingestion::Pipeline::from_loader(
         swiftide::loaders::FileLoader::new(path.clone())
             .with_extensions(&SUPPORTED_CODE_EXTENSIONS),
     )
@@ -211,8 +212,8 @@ async fn load_codebase(
     .then_store_with(
         swiftide::integrations::qdrant::Qdrant::builder()
             .client(
-                QdrantClientConfig::from_url(config.qdrant_url.as_str())
-                    .with_api_key(config.qdrant_api_key.clone())
+                QdrantConfig::from_url(config.qdrant_url.as_str())
+                    .api_key(config.qdrant_api_key.clone())
                     .build()
                     .expect("Could not build Qdrant client"),
             )
