@@ -1,7 +1,7 @@
 mod config;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::Write;
 
 use swiftide::{
@@ -17,10 +17,7 @@ use swiftide::{
     query::{self, answers, query_transformers, response_transformers},
 };
 
-// const SUPPORTED_CODE_EXTENSIONS: [&str; 27] = [
-//     "py", "rs", "js", "ts", "tsx", "jsx", "vue", "go", "java", "cpp", "cxx", "hpp", "c", "swift",
-//     "rb", "php", "cs", "html", "css", "sh", "kt", "clj", "cljc", "cljs", "edn", "scala", "groovy",
-// ];
+const EMBEDDING_SIZE: u64 = 3072;
 const SUPPORTED_CODE_EXTENSIONS: [&str; 1] = ["rs"];
 
 #[tokio::main]
@@ -31,7 +28,7 @@ async fn main() {
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v0.10-{}",
+        "swiftide-ask-v0.11-{}",
         path.to_string_lossy().replace("/", "-")
     );
 
@@ -42,11 +39,22 @@ async fn main() {
     let fastembed =
         integrations::fastembed::FastEmbed::try_default().expect("Could not create FastEmbed");
 
+    let qdrant = Qdrant::builder()
+        .batch_size(50)
+        .vector_size(EMBEDDING_SIZE)
+        .collection_name(namespace.as_str())
+        .build()
+        .expect("Could not create Qdrant");
+
+    let redis_url = config.redis_url.as_deref().expect("Expected redis url");
+
+    let redis = Redis::try_from_url(redis_url, namespace).expect("Could not create Redis");
+
     load_codebase(
-        config,
         &llm_client,
         fastembed.clone(),
-        &namespace,
+        qdrant.clone(),
+        redis.clone(),
         path.clone(),
     )
     .await
@@ -66,15 +74,9 @@ async fn main() {
             break;
         }
 
-        let answer = ask(
-            &llm_client,
-            fastembed.clone(),
-            &namespace,
-            path.clone(),
-            question,
-        )
-        .await
-        .expect("Could not ask question");
+        let answer = ask(&llm_client, fastembed.clone(), qdrant.clone(), question)
+            .await
+            .expect("Could not ask question");
         println!("{}", answer);
     }
 }
@@ -82,16 +84,9 @@ async fn main() {
 async fn ask(
     llm_client: &Ollama,
     embed: FastEmbed,
-    namespace: &str,
-    _path: PathBuf,
+    qdrant: Qdrant,
     question: String,
 ) -> Result<String> {
-    let qdrant = Qdrant::builder()
-        .batch_size(50)
-        .vector_size(3072)
-        .collection_name(namespace)
-        .build()?;
-
     let pipeline = query::Pipeline::default()
         .then_transform_query(query_transformers::GenerateSubquestions::from_client(
             llm_client.clone(),
@@ -109,24 +104,15 @@ async fn ask(
 }
 
 async fn load_codebase(
-    config: &config::Config,
     llm_client: &Ollama,
     embed: FastEmbed,
-    namespace: &str,
+    qdrant: Qdrant,
+    redis: Redis,
     path: PathBuf,
 ) -> Result<()> {
-    let qdrant = Qdrant::builder()
-        .batch_size(50)
-        .vector_size(3072)
-        .collection_name("swiftide-examples")
-        .build()?;
-
     // Load any documentation
     indexing::Pipeline::from_loader(FileLoader::new(path.clone()).with_extensions(&["md"]))
-        .filter_cached(Redis::try_from_url(
-            config.redis_url.as_deref().context("Expected redis url")?,
-            namespace,
-        )?)
+        .filter_cached(redis.clone())
         .then_chunk(ChunkMarkdown::from_chunk_range(100..5000))
         .then(MetadataQAText::new(llm_client.clone()))
         .then_in_batch(100, Embed::new(embed))
@@ -139,10 +125,7 @@ async fn load_codebase(
     indexing::Pipeline::from_loader(
         FileLoader::new(path.clone()).with_extensions(&SUPPORTED_CODE_EXTENSIONS),
     )
-    .filter_cached(Redis::try_from_url(
-        config.redis_url.as_deref().context("Expected redis url")?,
-        namespace,
-    )?)
+    .filter_cached(redis)
     .then(OutlineCodeTreeSitter::try_for_language(
         "rust",
         Some(code_chunk_size),
