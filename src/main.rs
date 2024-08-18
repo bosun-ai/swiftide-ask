@@ -9,32 +9,63 @@ use swiftide::{
         self,
         loaders::FileLoader,
         transformers::{
-            ChunkCode, ChunkMarkdown, CompressCodeOutline, Embed, MetadataQACode, MetadataQAText,
-            OutlineCodeTreeSitter,
+            ChunkCode, ChunkMarkdown, Embed, MetadataQACode, MetadataQAText, OutlineCodeTreeSitter,
         },
     },
-    integrations::{self, fastembed::FastEmbed, ollama::Ollama, qdrant::Qdrant, redis::Redis},
+    integrations::{
+        self, fastembed::FastEmbed, ollama::Ollama, openai::OpenAI, qdrant::Qdrant, redis::Redis,
+    },
     query::{self, answers, query_transformers, response_transformers},
 };
+
+// OpenTelemetry
+use opentelemetry::trace::TracerProvider as _;
+use tracing::instrument;
+use tracing_opentelemetry;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const EMBEDDING_SIZE: u64 = 3072;
 const SUPPORTED_CODE_EXTENSIONS: [&str; 1] = ["rs"];
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .expect("Couldn't create OTLP tracer")
+        .tracer("swiftide-ask");
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(otel_layer)
+        .init();
+
     let config = config::Config::from_env();
 
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v0.11-{}",
+        "swiftide-ask-v0.15-{}",
         path.to_string_lossy().replace("/", "-")
     );
 
-    let llm_client = integrations::ollama::Ollama::default()
-        .with_default_prompt_model("llama3.1")
-        .to_owned();
+    // let llm_client = integrations::ollama::Ollama::default()
+    //     .with_default_prompt_model("llama3.1")
+    //     .to_owned();
+
+    let llm_client = integrations::openai::OpenAI::builder()
+        .default_embed_model("text-embedding-3-small")
+        .default_prompt_model("gpt-4o-mini")
+        .build()
+        .expect("Could not create OpenAI");
 
     let fastembed =
         integrations::fastembed::FastEmbed::try_default().expect("Could not create FastEmbed");
@@ -81,8 +112,9 @@ async fn main() {
     }
 }
 
+#[instrument]
 async fn ask(
-    llm_client: &Ollama,
+    llm_client: &OpenAI,
     embed: FastEmbed,
     qdrant: Qdrant,
     question: String,
@@ -103,8 +135,9 @@ async fn ask(
     Ok(result.answer().into())
 }
 
+#[instrument]
 async fn load_codebase(
-    llm_client: &Ollama,
+    llm_client: &OpenAI,
     embed: FastEmbed,
     qdrant: Qdrant,
     redis: Redis,
@@ -112,7 +145,7 @@ async fn load_codebase(
 ) -> Result<()> {
     // Load any documentation
     indexing::Pipeline::from_loader(FileLoader::new(path.clone()).with_extensions(&["md"]))
-        .filter_cached(redis.clone())
+        // .filter_cached(redis.clone())
         .then_chunk(ChunkMarkdown::from_chunk_range(100..5000))
         .then(MetadataQAText::new(llm_client.clone()))
         .then_in_batch(100, Embed::new(embed))
@@ -125,7 +158,7 @@ async fn load_codebase(
     indexing::Pipeline::from_loader(
         FileLoader::new(path.clone()).with_extensions(&SUPPORTED_CODE_EXTENSIONS),
     )
-    .filter_cached(redis)
+    // .filter_cached(redis)
     .then(OutlineCodeTreeSitter::try_for_language(
         "rust",
         Some(code_chunk_size),
@@ -134,9 +167,8 @@ async fn load_codebase(
         "rust",
         10..code_chunk_size,
     )?)
-    .then(CompressCodeOutline::new(llm_client.clone()))
-    .log_errors()
-    .filter_errors()
+    // .log_errors()
+    // .filter_errors()
     .then(MetadataQACode::new(llm_client.clone()))
     .then_in_batch(10, Embed::new(FastEmbed::builder().batch_size(10).build()?))
     .then_store_with(qdrant.clone())
