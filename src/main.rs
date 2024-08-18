@@ -25,6 +25,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 const EMBEDDING_SIZE: u64 = 384; // fastembed vector size
 const SUPPORTED_CODE_EXTENSIONS: [&str; 1] = ["rs"];
 
+#[instrument]
 #[tokio::main]
 async fn main() {
     let fmt_layer = tracing_subscriber::fmt::layer();
@@ -49,7 +50,7 @@ async fn main() {
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v0.16-{}",
+        "swiftide-ask-v0.18-{}",
         path.to_string_lossy().replace("/", "-")
     );
 
