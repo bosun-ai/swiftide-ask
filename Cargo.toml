@@ -4,14 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-swiftide = { version = "0.5.0", features = [
-  "qdrant",
-  "openai",
-  "redis",
-  "tree-sitter",
+# swiftide = { version = "0.5.0", features = [
+swiftide = { path = "../swiftide/swiftide", features = [
+    "qdrant",
+    "ollama",
+    "redis",
+    "tree-sitter",
+    "fastembed",
+    "openai",
 ] }
 anyhow = "1.0.86"
 indoc = "2.0.5"
-qdrant-client = "1.9.0"
 tokio = "1.38.0"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = "0.24.0"
+opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.17.0"
+tracing-opentelemetry = "0.25.0"
+opentelemetry-stdout = "0.5.0"
+tracing = "0.1.40"

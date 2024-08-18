@@ -1,226 +1,168 @@
 mod config;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use indoc::formatdoc;
-use qdrant_client::client::QdrantClientConfig;
-use std::io::Write;
-use swiftide::{self, EmbeddingModel, SimplePrompt};
+use anyhow::Result;
 
-const EMBEDDING_SIZE: u64 = 3072;
-// const SUPPORTED_CODE_EXTENSIONS: [&str; 27] = [
-//     "py", "rs", "js", "ts", "tsx", "jsx", "vue", "go", "java", "cpp", "cxx", "hpp", "c", "swift",
-//     "rb", "php", "cs", "html", "css", "sh", "kt", "clj", "cljc", "cljs", "edn", "scala", "groovy",
-// ];
+use swiftide::{
+    indexing::{
+        self,
+        loaders::FileLoader,
+        transformers::{
+            ChunkCode, ChunkMarkdown, Embed, MetadataQACode, MetadataQAText, OutlineCodeTreeSitter,
+        },
+    },
+    integrations::{self, fastembed::FastEmbed, qdrant::Qdrant, redis::Redis},
+    query::{self, answers, query_transformers, response_transformers},
+    traits::SimplePrompt,
+};
+
+use opentelemetry::trace::TracerProvider as _;
+use tracing::instrument;
+use tracing_opentelemetry;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+const EMBEDDING_SIZE: u64 = 384; // fastembed vector size
 const SUPPORTED_CODE_EXTENSIONS: [&str; 1] = ["rs"];
 
+#[instrument]
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .expect("Couldn't create OTLP tracer")
+        .tracer("swiftide-ask");
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(fmt_layer)
+        .with(otel_layer)
+        .init();
+
     let config = config::Config::from_env();
 
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v2-{}",
+        "swiftide-ask-v0.18-{}",
         path.to_string_lossy().replace("/", "-")
     );
 
-    let llm_client = swiftide::integrations::openai::OpenAI::builder()
-        .default_embed_model("text-embedding-3-large")
-        .default_prompt_model("gpt-3.5-turbo")
+    // let llm_client = integrations::ollama::Ollama::default()
+    //     .with_default_prompt_model("llama3.1")
+    //     .to_owned();
+
+    let llm_client = integrations::openai::OpenAI::builder()
+        .default_embed_model("text-embedding-3-small")
+        .default_prompt_model("gpt-4o-mini")
         .build()
-        .expect("Could not build OpenAI client");
+        .expect("Could not create OpenAI");
 
-    load_codebase(config, &llm_client, &namespace, path.clone())
-        .await
-        .expect("Could not load documentation");
+    let fastembed =
+        integrations::fastembed::FastEmbed::try_default().expect("Could not create FastEmbed");
 
-    let llm_client = swiftide::integrations::openai::OpenAI::builder()
-        .default_embed_model("text-embedding-3-large")
-        .default_prompt_model("gpt-4o")
+    let qdrant = Qdrant::builder()
+        .batch_size(50)
+        .vector_size(EMBEDDING_SIZE)
+        .collection_name(namespace.as_str())
         .build()
-        .expect("Could not build OpenAI client");
+        .expect("Could not create Qdrant");
 
-    loop {
-        println!("Ask a question about your code");
-        let mut question = String::new();
-        print!("\n(q to quit) > ");
-        std::io::stdout().flush().unwrap();
-        std::io::stdin()
-            .read_line(&mut question)
-            .expect("Failed to read line");
+    let redis_url = config.redis_url.as_deref().expect("Expected redis url");
 
-        question = question.trim().to_string();
-        if &question == "q" {
-            break;
-        }
+    let redis = Redis::try_from_url(redis_url, namespace).expect("Could not create Redis");
 
-        let answer = ask(config, &llm_client, &namespace, path.clone(), question)
-            .await
-            .expect("Could not ask question");
-        println!("{}", answer);
-    }
+    load_codebase(
+        llm_client.clone(),
+        fastembed.clone(),
+        qdrant.clone(),
+        redis.clone(),
+        path.clone(),
+    )
+    .await
+    .expect("Could not load documentation");
+
+    let question = std::env::args()
+        .nth(1)
+        .expect("Expected question as argument");
+
+    let answer = ask(
+        llm_client.clone(),
+        fastembed.clone(),
+        qdrant.clone(),
+        question,
+    )
+    .await
+    .expect("Could not ask question");
+
+    println!("{}", answer);
 }
 
+#[instrument]
 async fn ask(
-    config: &config::Config,
-    llm_client: &swiftide::integrations::openai::OpenAI,
-    namespace: &str,
-    _path: PathBuf,
+    llm_client: impl SimplePrompt + Clone + 'static,
+    embed: FastEmbed,
+    qdrant: Qdrant,
     question: String,
 ) -> Result<String> {
-    let qdrant_client = QdrantClientConfig::from_url(config.qdrant_url.as_str())
-        .with_api_key(config.qdrant_api_key.clone())
-        .build()
-        .expect("Could not build Qdrant client");
+    let pipeline = query::Pipeline::default()
+        .then_transform_query(query_transformers::GenerateSubquestions::from_client(
+            llm_client.clone(),
+        ))
+        .then_transform_query(query_transformers::Embed::from_client(embed))
+        .then_retrieve(qdrant.clone())
+        .then_transform_response(response_transformers::Summary::from_client(
+            llm_client.clone(),
+        ))
+        .then_answer(answers::Simple::from_client(llm_client.clone()));
 
-    let transformed_question = llm_client.prompt(&formatdoc!(r"
-        Your job is to help a code query tool finding the right context.
+    let result = pipeline.query(question).await?;
 
-        Given the following question:
-        {question}
-
-        Please think of 5 additional questions that can help answering the original question. The code is written in {lang}.
-
-        Especially consider what might be relevant to answer the question, like dependencies, usage and structure of the code.
-
-        Please respond with the original question and the additional questions only.
-
-        ## Example
-
-        - {question}
-        - Additional question 1
-        - Additional question 2
-        - Additional question 3
-        - Additional question 4
-        - Additional question 5
-        ", question = question, lang = "rust"
-    )).await?;
-
-    let embedded_question = llm_client
-        .embed(vec![transformed_question.clone()])
-        .await?
-        .pop()
-        .context("Expected embedding")?;
-
-    let answer_context_points = qdrant_client
-        .search_points(&qdrant_client::qdrant::SearchPoints {
-            collection_name: namespace.to_string(),
-            vector: embedded_question,
-            limit: 10,
-            with_payload: Some(true.into()),
-            ..Default::default()
-        })
-        .await?;
-
-    // Probably better to return the documents themselves, not the metadata
-    let answer_context = answer_context_points
-        .result
-        .into_iter()
-        .map(|v| v.payload.get("content").unwrap().to_string())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    // let answer_context =
-    //     answer_context_points
-    //         .result
-    //         .into_iter()
-    //         .fold(String::new(), |acc, point| {
-    //             point
-    //                 .payload
-    //                 .into_iter()
-    //                 .fold(acc, |acc, (k, v)| format!("{}\n{}: {}", acc, k, v))
-    //         });
-
-    let prompt = formatdoc!(
-        r#"
-        Answer the following question(s):
-        {question}
-
-        ## Constraints
-        * Only answer based on the provided context below
-        * Always reference files by the full path if it is relevant to the question
-        * Answer the question fully and remember to be concise
-        * Only answer based on the given context. If you cannot answer the question based on the
-            context, say so.
-
-        ## Context:
-        {answer_context}
-        "#,
-    );
-
-    let answer = llm_client.prompt(prompt.as_str()).await?;
-
-    Ok(answer)
+    Ok(result.answer().into())
 }
 
+#[instrument]
 async fn load_codebase(
-    config: &config::Config,
-    llm_client: &swiftide::integrations::openai::OpenAI,
-    namespace: &str,
+    llm_client: impl SimplePrompt + Clone + 'static,
+    embed: FastEmbed,
+    qdrant: Qdrant,
+    redis: Redis,
     path: PathBuf,
 ) -> Result<()> {
-    // Load any documentation
-    swiftide::ingestion::IngestionPipeline::from_loader(
-        swiftide::loaders::FileLoader::new(path.clone()).with_extensions(&["md"]),
-    )
-    .filter_cached(swiftide::integrations::redis::Redis::try_from_url(
-        config.redis_url.as_deref().context("Expected redis url")?,
-        namespace,
-    )?)
-    .then_chunk(swiftide::transformers::ChunkMarkdown::from_chunk_range(
-        100..5000,
-    ))
-    .then(swiftide::transformers::MetadataQAText::new(
-        llm_client.clone(),
-    ))
-    .then_in_batch(100, swiftide::transformers::Embed::new(llm_client.clone()))
-    .then_store_with(
-        swiftide::integrations::qdrant::Qdrant::builder()
-            .client(
-                QdrantClientConfig::from_url(config.qdrant_url.as_str())
-                    .with_api_key(config.qdrant_api_key.clone())
-                    .build()
-                    .expect("Could not build Qdrant client"),
-            )
-            .collection_name(namespace.to_string())
-            .batch_size(1024)
-            .vector_size(EMBEDDING_SIZE)
-            .build()?,
-    )
-    .run()
-    .await?;
+    indexing::Pipeline::from_loader(FileLoader::new(path.clone()).with_extensions(&["md"]))
+        .filter_cached(redis.clone())
+        .then_chunk(ChunkMarkdown::from_chunk_range(100..5000))
+        .then(MetadataQAText::new(llm_client.clone()))
+        .then_in_batch(100, Embed::new(embed))
+        .then_store_with(qdrant.clone())
+        .run()
+        .await?;
 
-    swiftide::ingestion::IngestionPipeline::from_loader(
-        swiftide::loaders::FileLoader::new(path.clone())
-            .with_extensions(&SUPPORTED_CODE_EXTENSIONS),
+    let code_chunk_size = 2048;
+
+    indexing::Pipeline::from_loader(
+        FileLoader::new(path.clone()).with_extensions(&SUPPORTED_CODE_EXTENSIONS),
     )
-    .filter_cached(swiftide::integrations::redis::Redis::try_from_url(
-        config.redis_url.as_deref().context("Expected redis url")?,
-        namespace,
+    .filter_cached(redis)
+    .then(OutlineCodeTreeSitter::try_for_language(
+        "rust",
+        Some(code_chunk_size),
     )?)
-    .then_chunk(
-        swiftide::transformers::ChunkCode::try_for_language_and_chunk_size("rust", 10..2048)?,
-    )
+    .then_chunk(ChunkCode::try_for_language_and_chunk_size(
+        "rust",
+        10..code_chunk_size,
+    )?)
     .log_errors()
     .filter_errors()
-    .then(swiftide::transformers::MetadataQACode::new(
-        llm_client.clone(),
-    ))
-    .then_in_batch(10, swiftide::transformers::Embed::new(llm_client.clone()))
-    .then_store_with(
-        swiftide::integrations::qdrant::Qdrant::builder()
-            .client(
-                QdrantClientConfig::from_url(config.qdrant_url.as_str())
-                    .with_api_key(config.qdrant_api_key.clone())
-                    .build()
-                    .expect("Could not build Qdrant client"),
-            )
-            .batch_size(1024)
-            .vector_size(EMBEDDING_SIZE)
-            .collection_name(namespace.to_string())
-            .build()?,
-    )
+    .then(MetadataQACode::new(llm_client.clone()))
+    .then_in_batch(10, Embed::new(FastEmbed::builder().batch_size(10).build()?))
+    .then_store_with(qdrant.clone())
     .run()
     .await?;
 
