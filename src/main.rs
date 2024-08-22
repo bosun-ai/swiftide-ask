@@ -54,15 +54,15 @@ async fn main() {
         path.to_string_lossy().replace("/", "-")
     );
 
-    // let llm_client = integrations::ollama::Ollama::default()
-    //     .with_default_prompt_model("llama3.1")
-    //     .to_owned();
+    let llm_client = integrations::ollama::Ollama::default()
+        .with_default_prompt_model("llama3.1")
+        .to_owned();
 
-    let llm_client = integrations::openai::OpenAI::builder()
-        .default_embed_model("text-embedding-3-small")
-        .default_prompt_model("gpt-4o-mini")
-        .build()
-        .expect("Could not create OpenAI");
+    // let llm_client = integrations::openai::OpenAI::builder()
+    //     .default_embed_model("text-embedding-3-small")
+    //     .default_prompt_model("gpt-4o-mini")
+    //     .build()
+    //     .expect("Could not create OpenAI");
 
     let fastembed =
         integrations::fastembed::FastEmbed::try_default().expect("Could not create FastEmbed");
