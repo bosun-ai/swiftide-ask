@@ -164,7 +164,5 @@ async fn load_codebase(
     .then_in_batch(10, Embed::new(FastEmbed::builder().batch_size(10).build()?))
     .then_store_with(qdrant.clone())
     .run()
-    .await?;
-
-    Ok(())
+    .await
 }
