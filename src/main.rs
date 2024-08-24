@@ -50,13 +50,17 @@ async fn main() {
     let path = std::env::current_dir().unwrap();
 
     let namespace = format!(
-        "swiftide-ask-v0.18-{}",
+        "swiftide-ask-v0.18-{}-groq",
         path.to_string_lossy().replace("/", "-")
     );
 
-    let llm_client = integrations::ollama::Ollama::default()
-        .with_default_prompt_model("llama3.1")
+    let llm_client = integrations::groq::Groq::default()
+        .with_default_prompt_model("llama-3.1-8b-instant")
         .to_owned();
+
+    // let llm_client = integrations::ollama::Ollama::default()
+    //     .with_default_prompt_model("llama3.1")
+    //     .to_owned();
 
     // let llm_client = integrations::openai::OpenAI::builder()
     //     .default_embed_model("text-embedding-3-small")
